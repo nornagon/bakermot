@@ -37,12 +37,6 @@ function buildPacket(payload /* ArrayBuffer */) {
   bv[2 + payload.byteLength] = crc(payload);
   return buf
 }
-function packet() {
-  var payload = new DataView(new ArrayBuffer(3))
-  payload.setUint8(0, 0x00); // command
-  payload.setUint16(1, 1, true); // host version
-  return buildPacket(payload.buffer)
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 function ResponseReader(cb) {
@@ -96,10 +90,7 @@ ResponseReader.prototype.pending = function () {
 ///////////////////////////////////////////////////////////////////////////////
 
 function readResponse(id, cb) {
-  var rr = new ResponseReader(function (err, payload) {
-    if (err) throw err;
-    cb(payload)
-  })
+  var rr = new ResponseReader(cb)
 
   function readByte(cb) {
     chrome.serial.read(id, 1, function(info) {
@@ -114,7 +105,7 @@ function readResponse(id, cb) {
     });
   }
   function step() {
-    readByte(function(err,data) {
+    readByte(function(err, data) {
       if (err) throw err
       rr.data(data)
       if (rr.pending()) {
@@ -124,32 +115,266 @@ function readResponse(id, cb) {
   }
   step()
 }
-document.querySelector('button').onclick = function() {
+
+function BakerMot() {
+  this.connId = -1
+  this.busy = false
+}
+
+BakerMot.prototype.open = function(cb) {
+  var self = this
   chrome.serial.getPorts(function(ports) {
     log('connecting to ' + ports[0])
     chrome.serial.open(ports[0], {bitrate: 115200}, function(info) {
-      var connId = info.connectionId
-      if (connId < 0) {
-        log("failed to connect (connId = " + connId + ")")
-        return
+      self.connId = info.connectionId
+      if (self.connId < 0) {
+        log("failed to connect (connId = " + self.connId + ")")
+        return cb('failed')
       }
-      var p = packet()
-      chrome.serial.write(connId, p, function(info) {
-        log('p.length = '+p.byteLength+', bytesWritten = '+info.bytesWritten)
-        if (info.bytesWritten != p.byteLength) {
-          log('error!')
-          return
-        }
-        chrome.serial.flush(connId, function(res) {
-          if (!res) {
-            log("ERR: couldn't flush, is something up? continuing anyway..")
-          }
-          readResponse(connId, function(resp) {
-            var data = new DataView(resp)
-            log('makerbot version '+data.getUint16(1, true))
-          })
-        })
+      cb()
+    })
+  })
+}
+
+BakerMot.prototype._send_command = function(payload, cb) {
+  if (this.busy) throw 'one at a time, fellas!'
+  this.busy = true
+  var p = buildPacket(payload)
+  var self = this
+  chrome.serial.write(self.connId, p, function(info) {
+    if (info.bytesWritten != p.byteLength) {
+      log('error writing data: length = '+payload.byteLength+', bytesWritten = '+info.bytesWritten)
+      self.busy = false;
+      return cb('short write or error: '+info.bytesWritten)
+    }
+    chrome.serial.flush(self.connId, function(res) {
+      if (!res) {
+        log("ERR: couldn't flush, is something up? continuing anyway..")
+      }
+      readResponse(self.connId, function(err, resp) {
+        self.busy = false;
+        if (err) return cb('error reading response: '+err)
+        var data = new DataView(resp)
+        cb(undefined, data)
       })
     })
   })
 }
+
+BakerMot.prototype.get_version = function(cb) {
+  var payload = new DataView(new ArrayBuffer(3))
+  payload.setUint8(0, 0x00); // command
+  payload.setUint16(1, 100, true); // host version
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb(undefined, data.getUint16(1, true))
+  })
+}
+
+// reset axis positions to 0, clear command buffer
+BakerMot.prototype.init = function(cb) {
+  var payload = new DataView(new ArrayBuffer(1))
+  payload.setUint8(0, 0x01); // command
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb(undefined)
+  })
+}
+
+BakerMot.prototype.abort = function(cb) {
+  var payload = new DataView(new ArrayBuffer(1))
+  payload.setUint8(0, 0x07); // command
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb(undefined)
+  })
+}
+
+BakerMot.prototype.get_name = function(cb) {
+  // only works for v5.5, hardcoded. TODO(jeremya) eeprom maps.
+  var payload = new DataView(new ArrayBuffer(4))
+  payload.setUint8(0, 12); // command
+  payload.setUint16(1, 0x0022, true); // offset
+  payload.setUint8(3, 16); // length
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    var name = ''
+    for (var i = 1; i < data.byteLength; i++) {
+      var char = data.getUint8(i)
+      if (char == 0) break;
+      name += String.fromCharCode(data.getUint8(i));
+    }
+    cb(undefined, name)
+  })
+}
+
+BakerMot.prototype.find_axes_minima = function(axes, rate, timeout, cb) {
+  var payload = new DataView(new ArrayBuffer(8))
+  payload.setUint8(0, 131); // command
+  payload.setUint8(1, axes); // axis bitfield
+  payload.setUint32(2, rate, true); // feedrate, us between steps on max delta
+  payload.setUint16(6, timeout); // timeout, seconds
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb()
+  })
+}
+
+BakerMot.prototype.find_axes_maxima = function(axes, rate, timeout, cb) {
+  var payload = new DataView(new ArrayBuffer(8))
+  payload.setUint8(0, 132); // command
+  payload.setUint8(1, axes); // axis bitfield
+  payload.setUint32(2, rate, true); // feedrate, us between steps on max delta
+  payload.setUint16(6, timeout); // timeout, seconds
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb()
+  })
+}
+
+BakerMot.prototype.toggle_axes = function(axes, enable, cb) {
+  var payload = new DataView(new ArrayBuffer(2))
+  payload.setUint8(0, 137); // command
+  payload.setUint8(1, (axes & 0x7f) | ((enable ? 1 : 0) << 7)); // axis bitfield
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    cb()
+  })
+}
+
+BakerMot.prototype.get_position = function(cb) {
+  var payload = new DataView(new ArrayBuffer(1))
+  payload.setUint8(0, 21); // command
+  this._send_command(payload.buffer, function(err, data) {
+    if (err) return cb(err)
+    var x_pos_steps = data.getInt32(0, true)
+    var y_pos_steps = data.getInt32(4, true)
+    var z_pos_steps = data.getInt32(8, true)
+    var a_pos_steps = data.getInt32(12, true)
+    var b_pos_steps = data.getInt32(16, true)
+    var endstop_status = data.getUint16(20, true)
+    cb(undefined, {
+      x: x_pos_steps,
+      y: y_pos_steps,
+      z: z_pos_steps,
+      a: a_pos_steps,
+      b: b_pos_steps,
+      endstops: endstop_status,
+    })
+  })
+}
+
+BakerMot.prototype.queue_point = function(x,y,z,a,b,dur,cb) {
+  var payload = new DataView(new ArrayBuffer(26))
+  payload.setUint8(0, 142); // command
+  payload.setInt32(1, x, true);
+  payload.setInt32(5, y, true);
+  payload.setInt32(9, z, true);
+  payload.setInt32(13, a, true);
+  payload.setInt32(17, b, true);
+  payload.setUint32(21, dur, true);
+  payload.setUint8(25, 0xff);
+  this._send_command(payload.buffer, function(err, data) {
+    cb(err)
+  })
+}
+
+var bmo = new BakerMot()
+$ = function() { return document.querySelector.apply(document, arguments) }
+$('#connect').onclick = function() {
+  bmo.open(function(err) {
+    if (err) {
+      log('error connecting: '+err)
+      throw err
+    }
+    bmo.get_version(function (err, version) {
+      log("MakerBot firmware version "+version)
+      bmo.get_name(function(err,name){
+        log(name)
+        connected()
+      })
+    })
+  })
+}
+
+function command(name, fn) {
+  var b = $('#controls').appendChild(document.createElement('button'))
+  b.innerText = name
+  b.id = name
+  b.onclick = fn
+}
+
+command('abort', function() {
+  bmo.abort(function(){})
+})
+command('home', function() {
+  bmo.find_axes_maxima(1|2,500,60, function(err) {
+    bmo.find_axes_minima(4,500,60, function(err) {
+    })
+  })
+})
+command('get pos', function() {
+  bmo.get_position(function (err, p) {
+    log('X:'+p.x + ' Y:'+p.y + ' Z:'+p.z)
+  })
+})
+command('init', function() {
+  bmo.init(function(){})
+})
+JOG_SPEED = 100000
+command('x+', function() {
+  bmo.queue_point(1000,0,0,0,0,JOG_SPEED, function(err) {
+  })
+})
+command('x-', function() {
+  bmo.queue_point(-1000,0,0,0,0,JOG_SPEED, function(err) {
+  })
+})
+command('y+', function() {
+  bmo.queue_point(0,1000,0,0,0,JOG_SPEED, function(err) {
+  })
+})
+command('y-', function() {
+  bmo.queue_point(0,-1000,0,0,0,JOG_SPEED, function(err) {
+  })
+})
+command('z+', function() {
+  bmo.queue_point(0,0,1000,0,0,JOG_SPEED, function(err) {
+  })
+})
+command('z-', function() {
+  bmo.queue_point(0,0,-1000,0,0,JOG_SPEED, function(err) {
+  })
+})
+
+window.onkeydown = function(e) {
+  if (e.keyCode == 37) // left
+    document.getElementById('x-').onclick()
+  else if (e.keyCode == 39) // right
+    document.getElementById('x+').onclick()
+  else if (e.keyCode == 38) // up
+    document.getElementById('y+').onclick()
+  else if (e.keyCode == 40) // up
+    document.getElementById('y-').onclick()
+  else if (e.keyCode == 34) // pgdn
+    document.getElementById('z+').onclick()
+  else if (e.keyCode == 33) // pgdn
+    document.getElementById('z-').onclick()
+}
+
+function connected() {
+  var bs = $('#controls').querySelectorAll('button')
+  for (var i = 0; i < bs.length; i++) {
+    bs[i].removeAttribute('disabled')
+  }
+  $('#connect').setAttribute('disabled', 'disabled')
+}
+
+function disconnected() {
+  var bs = $('#controls').querySelectorAll('button')
+  for (var i = 0; i < bs.length; i++) {
+    bs[i].setAttribute('disabled', 'disabled')
+  }
+  $('#connect').removeAttribute('disabled')
+}
+disconnected()
