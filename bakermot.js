@@ -196,31 +196,64 @@ BakerMot.prototype._send_command = Command(function(payload, cb) {
 
 // Helper function for building payloads. Usage:
 //   cmd(142).s32(x).s32(y).s32(z).s32(a).s32(b).u32(duration).u8(flags).buffer
+function Builder(bigEndian) {
+  this.littleEndian = !bigEndian
+  this.data = [];
+  this.size = 0;
+}
+
+var sizes = {s32:4, u32:4, s16:2, u16:2, s8:1, u8:1, f32:4, f64:8};
+var setfns = {
+  s32:'setUint32', u32:'setInt32',
+  s16:'setInt16', u16:'setUint16',
+  s8:'setInt8', u8:'setUint8',
+  f32:'setFloat32', f64:'setFloat64',
+};
+
+var getfns = {
+  s32:'getUint32', u32:'getInt32',
+  s16:'getInt16', u16:'getUint16',
+  s8:'getInt8', u8:'getUint8',
+  f32:'getFloat32', f64:'getFloat64',
+};
+
+['s32','u32','s16','u16','s8','u8','f32','f64'].forEach(function(n) {
+  Builder.prototype[n] = function(i) { this.data.push([n,i]); this.size += sizes[n]; return this; };
+});
+
+Builder.prototype.__defineGetter__('buffer', function() {
+  var payload = new DataView(new ArrayBuffer(this.size));
+  var offset = 0;
+  for (var i in this.data) {
+    var d = this.data[i];
+    payload[setfns[d[0]]](offset, d[1], this.littleEndian);
+    offset += sizes[d[0]];
+  }
+  return payload;
+})
+
+var unbuild = function (buf, str, bigEndian) {
+  var dv = buf instanceof DataView ? buf : new DataView(buf)
+  var obj = {}
+  var offset = 0
+  str.split(/;/).forEach(function (s) {
+    var m = /(\w+)\s+(\w+)/.exec(s)
+    obj[m[2]] = dv[getfns[m[1]]](offset, !bigEndian);
+    offset += sizes[m[1]];
+  })
+  return obj
+}
+
 function cmd(id) {
-  var data = []
-  var size = 0
-  function builder() {}
-  var sizes = {s32:4,u32:4,s16:2,u16:2,s8:1,u8:1}
-  ['s32','u32','s16','u16','s8','u8'].forEach(function(n) {
-    builder[n] = function(i) { data.push([n,i]); size += sizes[n]; return builder }
-  })
-  var fns = {s32:'setUint32',u32:'setInt32',s16:'setInt16',u16:'setUint16',s8:'setInt8',u8:'setUint8'}
-  builder.__defineGetter__('buffer', function() {
-    var payload = new DataView(new ArrayBuffer(size + 1));
-    payload.setUint8(0, id);
-    var bs = 0;
-    for (var i in data) {
-      payload[fns[data[i][0]]](bs, data[i][1], true)
-    }
-  })
-  return builder;
+  return (new Builder).u8(id)
 }
 
 BakerMot.prototype.get_version = function(cb) {
   var payload = cmd(0).u16(/* host version */ 100)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
-    cb(undefined, data.getUint16(1, true))
+    var res = unbuild(data, 'u16 version')
+    cb(undefined, res.version)
   })
 }
 
@@ -291,20 +324,8 @@ BakerMot.prototype.get_position = function(cb) {
   var payload = cmd(21)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
-    var x_pos_steps = data.getInt32(0, true)
-    var y_pos_steps = data.getInt32(4, true)
-    var z_pos_steps = data.getInt32(8, true)
-    var a_pos_steps = data.getInt32(12, true)
-    var b_pos_steps = data.getInt32(16, true)
-    var endstop_status = data.getUint16(20, true)
-    cb(undefined, {
-      x: x_pos_steps,
-      y: y_pos_steps,
-      z: z_pos_steps,
-      a: a_pos_steps,
-      b: b_pos_steps,
-      endstops: endstop_status,
-    })
+    var res = unbuild(data, 's32 x; s32 y; s32 z; s32 a; s32 b; u16 endstops')
+    cb(undefined, res)
   })
 }
 
