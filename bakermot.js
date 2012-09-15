@@ -194,10 +194,30 @@ BakerMot.prototype._send_command = Command(function(payload, cb) {
   })
 })
 
+// Helper function for building payloads. Usage:
+//   cmd(142).s32(x).s32(y).s32(z).s32(a).s32(b).u32(duration).u8(flags).buffer
+function cmd(id) {
+  var data = []
+  var size = 0
+  function builder() {}
+  var sizes = {s32:4,u32:4,s16:2,u16:2,s8:1,u8:1}
+  ['s32','u32','s16','u16','s8','u8'].forEach(function(n) {
+    builder[n] = function(i) { data.push([n,i]); size += sizes[n]; return builder }
+  })
+  var fns = {s32:'setUint32',u32:'setInt32',s16:'setInt16',u16:'setUint16',s8:'setInt8',u8:'setUint8'}
+  builder.__defineGetter__('buffer', function() {
+    var payload = new DataView(new ArrayBuffer(size + 1));
+    payload.setUint8(0, id);
+    var bs = 0;
+    for (var i in data) {
+      payload[fns[data[i][0]]](bs, data[i][1], true)
+    }
+  })
+  return builder;
+}
+
 BakerMot.prototype.get_version = function(cb) {
-  var payload = new DataView(new ArrayBuffer(3))
-  payload.setUint8(0, 0x00); // command
-  payload.setUint16(1, 100, true); // host version
+  var payload = cmd(0).u16(/* host version */ 100)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb(undefined, data.getUint16(1, true))
@@ -206,8 +226,7 @@ BakerMot.prototype.get_version = function(cb) {
 
 // reset axis positions to 0, clear command buffer
 BakerMot.prototype.init = function(cb) {
-  var payload = new DataView(new ArrayBuffer(1))
-  payload.setUint8(0, 0x01); // command
+  var payload = cmd(1)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb(undefined)
@@ -215,8 +234,7 @@ BakerMot.prototype.init = function(cb) {
 }
 
 BakerMot.prototype.abort = function(cb) {
-  var payload = new DataView(new ArrayBuffer(1))
-  payload.setUint8(0, 0x07); // command
+  var payload = cmd(7)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb(undefined)
@@ -225,10 +243,7 @@ BakerMot.prototype.abort = function(cb) {
 
 BakerMot.prototype.get_name = function(cb) {
   // only works for v5.5, hardcoded. TODO(jeremya) eeprom maps.
-  var payload = new DataView(new ArrayBuffer(4))
-  payload.setUint8(0, 12); // command
-  payload.setUint16(1, 0x0022, true); // offset
-  payload.setUint8(3, 16); // length
+  var payload = cmd(12).u16(/* offset */ 0x0022).u8(/* length */ 16)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     var name = ''
@@ -242,11 +257,10 @@ BakerMot.prototype.get_name = function(cb) {
 }
 
 BakerMot.prototype.find_axes_minima = function(axes, rate, timeout, cb) {
-  var payload = new DataView(new ArrayBuffer(8))
-  payload.setUint8(0, 131); // command
-  payload.setUint8(1, axes); // axis bitfield
-  payload.setUint32(2, rate, true); // feedrate, us between steps on max delta
-  payload.setUint16(6, timeout); // timeout, seconds
+  var payload = cmd(131)
+    .u8(axes)     // axis bitfield
+    .u32(rate)    // feedrate, microseconds between steps on max delta
+    .u16(timeout) // timeout, seconds
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb()
@@ -254,11 +268,10 @@ BakerMot.prototype.find_axes_minima = function(axes, rate, timeout, cb) {
 }
 
 BakerMot.prototype.find_axes_maxima = function(axes, rate, timeout, cb) {
-  var payload = new DataView(new ArrayBuffer(8))
-  payload.setUint8(0, 132); // command
-  payload.setUint8(1, axes); // axis bitfield
-  payload.setUint32(2, rate, true); // feedrate, us between steps on max delta
-  payload.setUint16(6, timeout); // timeout, seconds
+  var payload = cmd(132)
+    .u8(axes)     // axis bitfield
+    .u32(rate)    // feedrate, microseconds between steps on max delta
+    .u16(timeout) // timeout, seconds
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb()
@@ -266,9 +279,8 @@ BakerMot.prototype.find_axes_maxima = function(axes, rate, timeout, cb) {
 }
 
 BakerMot.prototype.toggle_axes = function(axes, enable, cb) {
-  var payload = new DataView(new ArrayBuffer(2))
-  payload.setUint8(0, 137); // command
-  payload.setUint8(1, (axes & 0x7f) | ((enable ? 1 : 0) << 7)); // axis bitfield
+  var payload = cmd(137)
+    .u8((axes & 0x7f) | ((enable ? 1 : 0) << 7)) // axis bitfield, high bit is enable/disable
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb()
@@ -276,8 +288,7 @@ BakerMot.prototype.toggle_axes = function(axes, enable, cb) {
 }
 
 BakerMot.prototype.get_position = function(cb) {
-  var payload = new DataView(new ArrayBuffer(1))
-  payload.setUint8(0, 21); // command
+  var payload = cmd(21)
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     var x_pos_steps = data.getInt32(0, true)
@@ -298,15 +309,14 @@ BakerMot.prototype.get_position = function(cb) {
 }
 
 BakerMot.prototype.queue_point = function(x,y,z,a,b,dur,cb) {
-  var payload = new DataView(new ArrayBuffer(26))
-  payload.setUint8(0, 142); // command
-  payload.setInt32(1, x, true);
-  payload.setInt32(5, y, true);
-  payload.setInt32(9, z, true);
-  payload.setInt32(13, a, true);
-  payload.setInt32(17, b, true);
-  payload.setUint32(21, dur, true);
-  payload.setUint8(25, 0xff);
+  var payload = cmd(142)
+    .s32(x)  // axes, in steps
+    .s32(y)
+    .s32(z)
+    .s32(a)
+    .s32(b)
+    .u32(dur) // duration, microseconds
+    .u8(0xff) // bitfield, 1 for relative, 0 for absolute
   this._send_command(payload.buffer, function(err, data) {
     cb(err)
   })
