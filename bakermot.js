@@ -122,12 +122,43 @@ function readResponse(id, cb) {
 
 function BakerMot() {
   this.connId = -1
-  // TODO(jeremya): keep a queue of commands so we can pretend to be
-  // synchronous.
-  this.busy = false
 }
 
-BakerMot.prototype.open = function(cb) {
+// This makes sure only one command is running at a time. If you execute a
+// command before the last one has finished, we'll buffer up the request and
+// fire it off after the last callback is called.
+var Command = function(fn) {
+  return function() {
+    var self = this
+    if (arguments.length < 1 || typeof arguments[arguments.length-1] != 'function')
+      throw "no callback given"
+    var args = Array.prototype.slice.call(arguments, 0, arguments.length-1)
+    var cb = arguments[arguments.length-1]
+    var next = function() {
+      try {
+        cb.apply(undefined, arguments)
+      } catch (e) {
+        // TODO: break the queue if there's an error?
+      }
+      if (self.queue.length) {
+        self.queue.shift().call(self)
+      } else {
+        self.queue = undefined
+      }
+    }
+    args.push(next)
+
+    if (typeof self.queue === 'undefined') {
+      // no current action
+      fn.apply(this, args)
+      self.queue = []
+    } else {
+      self.queue.push(function() { return fn.apply(this, args) })
+    }
+  }
+}
+
+BakerMot.prototype.open = Command(function(cb) {
   var self = this
   chrome.serial.getPorts(function(ports) {
     log('connecting to ' + ports[0])
@@ -140,17 +171,14 @@ BakerMot.prototype.open = function(cb) {
       cb()
     })
   })
-}
+})
 
-BakerMot.prototype._send_command = function(payload, cb) {
-  if (this.busy) throw 'one at a time, fellas!'
-  this.busy = true
+BakerMot.prototype._send_command = Command(function(payload, cb) {
   var p = buildPacket(payload)
   var self = this
   chrome.serial.write(self.connId, p, function(info) {
     if (info.bytesWritten != p.byteLength) {
       log('error writing data: length = '+payload.byteLength+', bytesWritten = '+info.bytesWritten)
-      self.busy = false;
       return cb('short write or error: '+info.bytesWritten)
     }
     chrome.serial.flush(self.connId, function(res) {
@@ -158,14 +186,13 @@ BakerMot.prototype._send_command = function(payload, cb) {
         log("ERR: couldn't flush, is something up? continuing anyway..")
       }
       readResponse(self.connId, function(err, resp) {
-        self.busy = false;
         if (err) return cb('error reading response: '+err)
         var data = new DataView(resp)
         cb(undefined, data)
       })
     })
   })
-}
+})
 
 BakerMot.prototype.get_version = function(cb) {
   var payload = new DataView(new ArrayBuffer(3))
