@@ -257,22 +257,37 @@ BakerMot.prototype.get_version = function(cb) {
   })
 }
 
-// reset axis positions to 0, clear command buffer
-BakerMot.prototype.init = function(cb) {
-  var payload = cmd(1)
-  this._send_command(payload.buffer, function(err, data) {
-    if (err) return cb(err)
-    cb(undefined)
-  })
+function control(id, str) {
+  return function(cb) {
+    if (typeof str == 'function') {
+      cb = str
+      str = undefined
+    }
+    var payload = cmd(id)
+    this._send_command(payload.buffer, function(err, data) {
+      if (err) return cb(err)
+      var unpacked;
+      if (str) {
+        unpacked = unbuild(data, str)
+        if (Object.keys(unpacked).length == 1)
+          unpacked = unpacked[Object.keys(unpacked)[0]]
+      }
+      cb(undefined, unpacked)
+    })
+  }
 }
 
-BakerMot.prototype.abort = function(cb) {
-  var payload = cmd(7)
-  this._send_command(payload.buffer, function(err, data) {
-    if (err) return cb(err)
-    cb(undefined)
-  })
-}
+// reset axis positions to 0, clear command buffer
+BakerMot.prototype.init            = control(1)
+BakerMot.prototype.get_buffer_size = control(2, 'u32 bytes')
+BakerMot.prototype.clear_buffer    = control(3)
+BakerMot.prototype.abort           = control(7)
+BakerMot.prototype.toggle_pause    = control(8)
+BakerMot.prototype.is_finished     = control(11, 'u8 finished')
+BakerMot.prototype.soft_reset      = control(17)
+BakerMot.prototype.get_position    = control(21, 's32 x; s32 y; s32 z; s32 a; s32 b; u16 endstops')
+BakerMot.prototype.get_motherboard_status = control(23, 'u8 status')
+BakerMot.prototype.get_comms_stats = control(25, 'u32 packets_received; u32 packets_sent; u32 tool_dropped; u32 tool_retries; u32 tool_noise')
 
 BakerMot.prototype.get_name = function(cb) {
   // only works for v5.5, hardcoded. TODO(jeremya) eeprom maps.
@@ -317,15 +332,6 @@ BakerMot.prototype.toggle_axes = function(axes, enable, cb) {
   this._send_command(payload.buffer, function(err, data) {
     if (err) return cb(err)
     cb()
-  })
-}
-
-BakerMot.prototype.get_position = function(cb) {
-  var payload = cmd(21)
-  this._send_command(payload.buffer, function(err, data) {
-    if (err) return cb(err)
-    var res = unbuild(data, 's32 x; s32 y; s32 z; s32 a; s32 b; u16 endstops')
-    cb(undefined, res)
   })
 }
 
